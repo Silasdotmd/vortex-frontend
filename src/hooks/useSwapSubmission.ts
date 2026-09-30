@@ -1,11 +1,16 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { walletAdapter } from "@/lib/wallet";
-import { createIntent, submitIntent } from "@/lib/api";
-import { verifySignedXdrMatches } from "@/lib/xdrReview";
+import { ApiError, createIntent, submitIntent, TimeoutError } from "@/lib/api";
+import {
+  decodeXdr,
+  validateSwapXdr,
+  verifySignedXdrMatches,
+  XdrMismatchError,
+} from "@/lib/xdrReview";
 import { useWalletStore } from "@/store/wallet";
 import { useToastStore } from "@/store/toast";
-import { decodeXdr, validateSwapXdr, XdrMismatchError } from "@/lib/xdrReview";
 import type { QuoteRequest } from "@/lib/types";
+import { assertWalletReady } from "@/lib/network";
 
 export type SwapSubmissionStatus =
   | "idle"
@@ -98,7 +103,9 @@ export function useSwapSubmission() {
   }, []);
 
   const submit = useCallback(async (params: QuoteRequest) => {
-    if (PENDING_STATUSES.includes(status)) {
+    // Read the ref, not `status`: it updates synchronously, so a double-click
+    // can't start a second submission before React re-renders.
+    if (PENDING_STATUSES.includes(stepRef.current)) {
       return;
     }
 
@@ -117,6 +124,8 @@ export function useSwapSubmission() {
         }
       }
 
+      assertWalletReady(process.env.NEXT_PUBLIC_NETWORK ?? "testnet", wallet.network);
+
       advance("building");
       const { intentId: newIntentId, unsignedXdr } = await createIntent({
         ...params,
@@ -128,7 +137,7 @@ export function useSwapSubmission() {
       // Decode the XDR the relay returned before handing it to Freighter.
       // A decode failure or a mismatch against the user's submitted params is
       // a hard stop — we never fall back to signing an unvalidated XDR.
-      setStatus("reviewing");
+      advance("reviewing");
       const decoded = decodeXdr(unsignedXdr, wallet.network);
       validateSwapXdr(decoded, {
         srcAmount: params.srcAmount,
@@ -136,10 +145,12 @@ export function useSwapSubmission() {
       });
       // ──────────────────────────────────────────────────────────────────────
 
-      setStatus("awaiting-signature");
-      const signedXdr = await walletAdapter.signTransaction(unsignedXdr, {
-        network: wallet.network ?? undefined,
-      });
+      advance("awaiting-signature");
+      assertWalletReady(process.env.NEXT_PUBLIC_NETWORK ?? "testnet", useWalletStore.getState().network);
+      const signedXdr = await walletAdapter.signTransaction(
+        unsignedXdr,
+        wallet.network ? { network: wallet.network } : undefined,
+      );
 
       // Defense-in-depth: verify signed XDR matches unsigned (Issue #308)
       const xdrVerification = verifySignedXdrMatches(unsignedXdr, signedXdr);
@@ -147,7 +158,7 @@ export function useSwapSubmission() {
         throw new Error(xdrVerification.error ?? "Transaction verification failed. The signed transaction does not match what was reviewed.");
       }
 
-      setStatus("submitting");
+      advance("submitting");
       await submitIntent(newIntentId, signedXdr);
 
       advance("success");
@@ -159,12 +170,12 @@ export function useSwapSubmission() {
           : err instanceof Error
           ? err.message
           : "Failed to submit swap.";
-      setStatus("error");
+      advance("error");
       setError(message);
       setErrorKind(classifySwapError(err));
       useToastStore.getState().addToast(message, "error");
     }
-  }, [status]);
+  }, [advance]);
 
   const reset = useCallback(() => {
     stepRef.current = "idle";

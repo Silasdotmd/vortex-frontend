@@ -8,7 +8,7 @@ JSON parsing. Each frame is expected to be a JSON object matched to the generic 
 
 **Connection behavior:**
 
-- Reconnect delay: 3 seconds
+- Reconnect delay: exponential backoff starting at 3 seconds, capped at 60 seconds, with ±20% jitter and a 10-attempt cap. Returning to a visible tab resets the attempt counter.
 - Malformed frames are silently ignored
 - Passing `null` as the URL tears down the socket and stays idle
 
@@ -68,6 +68,30 @@ a single "N intents updated" toast when several land within the same
 the connected wallet address changes. Browser `Notification` support was
 scoped out of the initial pass — see issue #231 — since it requires an
 explicit settings toggle to request permission.
+
+## Per-Intent Live Updates (`useIntent`)
+
+`useIntent` (`src/hooks/useIntent.ts`) provides live updates for a single intent
+detail page using two complementary mechanisms:
+
+1. **SWR polling** — `refreshInterval: 5_000` while the intent is non-terminal.
+   Once `filled` or `failed` is observed the interval drops to `0`, stopping
+   unnecessary requests automatically.
+
+2. **WebSocket overlay** — subscribes to the same `NEXT_PUBLIC_WS_URL` feed as
+   `useLiveIntents`. Because the backend broadcasts every status change as a
+   `FeedItem`, filtering is done client-side by `id`. This gives sub-second
+   updates when the socket is live, with polling as an automatic fallback.
+
+**No new subscription shape is introduced** — the existing `FeedItem` message
+format is reused. If the backend gains per-intent rooms in the future, the WS
+URL passed to `useWebSocket` in `useIntent` can be changed to a targeted
+endpoint without any changes to the broader protocol.
+
+**Terminal state handling** — once `filled` or `failed` is observed (from either
+the REST snapshot or a WS message), `useIntent` passes `null` to `useWebSocket`,
+tearing down the socket subscription for that intent, and sets SWR's
+`refreshInterval` to `0`.
 
 ## Backend Reference
 
